@@ -224,6 +224,14 @@ if (!delegated) {
     "repoUrl": "https://github.com/siliconjungle/-shapeshift-labs-frontier-assets"
   },
   {
+    "id": "frontier-blueprint",
+    "name": "@shapeshift-labs/frontier-blueprint",
+    "role": "Serializable Blueprint/Prefab flyweight templates for Frontier apps, including parameterized instantiation, deterministic ID/path remapping, compact overrides, variants, effective-state materialization, scene/state patch emission, dependency metadata, and registry graph output.",
+    "npmUrl": "https://www.npmjs.com/package/@shapeshift-labs/frontier-blueprint",
+    "repoName": "siliconjungle/-shapeshift-labs-frontier-blueprint",
+    "repoUrl": "https://github.com/siliconjungle/-shapeshift-labs-frontier-blueprint"
+  },
+  {
     "id": "frontier-triggers",
     "name": "@shapeshift-labs/frontier-triggers",
     "role": "Capability-gated event trigger registry, scoped event envelopes, listener/reaction rules, structured rejection, deterministic event-to-action scheduling, replay/provenance records, and registry graph output.",
