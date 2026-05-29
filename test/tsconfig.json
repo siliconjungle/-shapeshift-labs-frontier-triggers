@@ -1,0 +1,19 @@
+{
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "paths": {
+      "@shapeshift-labs/frontier-triggers": [
+        "../src/index.ts"
+      ],
+      "@shapeshift-labs/frontier": [
+        "../../frontier/src/index.ts"
+      ],
+      "@shapeshift-labs/frontier/*": [
+        "../../frontier/src/*.ts"
+      ]
+    }
+  },
+  "include": ["types.ts"]
+}
