@@ -241,4 +241,103 @@ const replayed = replayRuntime.replay([
 assert.strictEqual(replayed.accepted, 1);
 assert.strictEqual(replayed.rejected, 1);
 
+const cascadeDispatches = [];
+const cascadeRuntime = createTriggerRuntime({
+  capabilities: ['gameplay.damage'],
+  actions: {
+    has(id) {
+      return id === 'player.damage' || id === 'ui.toast';
+    },
+    dispatch(id, input, options) {
+      cascadeDispatches.push({ id, input, options });
+      return { ok: true, id };
+    }
+  },
+  now: () => 4000
+});
+cascadeRuntime.register({
+  id: 'collision.damage',
+  event: 'physics.collision.start',
+  requires: ['gameplay.damage'],
+  action: {
+    id: 'player.damage',
+    mode: 'dispatch',
+    input: { amount: 1 },
+    emit: {
+      type: 'player.damaged',
+      payload: { amount: 1 }
+    }
+  }
+});
+cascadeRuntime.register({
+  id: 'damage.toast',
+  event: 'player.damaged',
+  action: { id: 'ui.toast', mode: 'dispatch', input: { text: 'Ouch' } }
+});
+const cascaded = cascadeRuntime.require({
+  id: 'evt-hit',
+  type: 'physics.collision.start',
+  source: 'inkwell.runtime',
+  subject: 'player:local',
+  scope: { kind: 'world', id: 'demo-world' },
+  subjects: [{ kind: 'entity', id: 'player-local', role: 'player' }],
+  payload: { normal: [0, -1] }
+});
+assert.strictEqual(cascaded.accepted, true);
+assert.strictEqual(cascaded.records.length, 2);
+assert.strictEqual(cascaded.cascaded.length, 1);
+assert.strictEqual(cascaded.cascaded[0].event.type, 'player.damaged');
+assert.strictEqual(cascaded.cascaded[0].event.causeId, 'evt-hit');
+assert.strictEqual(cascaded.cascaded[0].event.scope?.kind, 'world');
+assert.strictEqual(cascaded.cascaded[0].event.scope?.id, 'demo-world');
+assert.deepStrictEqual(cascadeDispatches.map((entry) => entry.id), ['player.damage', 'ui.toast']);
+assert.ok(cascadeRuntime.get('collision.damage').emits.includes('player.damaged'));
+
+const loopRuntime = createTriggerRuntime({
+  maxCascadeDepth: 0,
+  actions: {
+    dispatch() {
+      return { ok: true };
+    }
+  }
+});
+loopRuntime.register({
+  id: 'loop',
+  event: 'loop.tick',
+  action: {
+    id: 'loop.dispatch',
+    mode: 'dispatch',
+    emit: { type: 'loop.tick' }
+  }
+});
+const looped = loopRuntime.require({ id: 'evt-loop', type: 'loop.tick' });
+assert.strictEqual(looped.accepted, true);
+assert.strictEqual(looped.cascaded.length, 1);
+assert.strictEqual(looped.cascaded[0].accepted, false);
+assert.strictEqual(looped.cascaded[0].rejection?.code, 'cascade-depth');
+
+const directWithRegistry = createTriggerRuntime({
+  actions: {
+    has() {
+      return false;
+    }
+  }
+});
+let ranDirectAction = false;
+directWithRegistry.register({
+  id: 'direct.run.with.registry',
+  event: 'direct.run',
+  action: {
+    id: 'local.run',
+    mode: 'dispatch',
+    run() {
+      ranDirectAction = true;
+      return { ok: true };
+    }
+  }
+});
+const directResult = directWithRegistry.require({ type: 'direct.run' });
+assert.strictEqual(directResult.accepted, true);
+assert.strictEqual(ranDirectAction, true);
+
 console.log('frontier triggers smoke passed');

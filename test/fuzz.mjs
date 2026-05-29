@@ -12,6 +12,7 @@ for (let i = 0; i < cases; i++) {
   const runtime = createTriggerRuntime({
     capabilities,
     now: () => 100000 + i,
+    maxCascadeDepth: 2,
     actions: {
       has(id) {
         return id.startsWith('action.');
@@ -41,6 +42,9 @@ for (let i = 0; i < cases; i++) {
     const result = chance(0.4) ? runtime.require(event) : runtime.emit(event);
     assert.strictEqual(result.event.type, event.type);
     assert.strictEqual(result.record.event.id, result.event.id);
+    assert.ok(result.records.length >= 1);
+    assert.strictEqual(result.records[0].id, result.record.id);
+    assert.strictEqual(result.cascaded.length, result.records.length - 1);
     assert.strictEqual(result.outcomes.length, result.record.outcomes.length);
     for (const outcome of result.outcomes) {
       assert.ok(definitions.some((definition) => definition.id === outcome.triggerId));
@@ -76,7 +80,15 @@ function makeTrigger(index) {
     id: 'action.' + randInt(0, 12),
     mode: pick(['schedule', 'dispatch']),
     lane: pick(['gameplay', 'render', 'audio', 'dom']),
-    input: { index, value: randInt(0, 1000) }
+    input: { index, value: randInt(0, 1000) },
+    emit: chance(0.2)
+      ? {
+          type: pick(['custom.downstream', 'game.score.changed', 'ui.flash']),
+          payload: { from: index },
+          inheritScope: true,
+          inheritSubjects: true
+        }
+      : undefined
   };
   const when = [];
   if (chance(0.5)) when.push({ path: 'payload.enabled', equals: true });

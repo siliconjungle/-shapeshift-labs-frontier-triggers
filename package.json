@@ -1,6 +1,6 @@
 {
   "name": "@shapeshift-labs/frontier-triggers",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Capability-gated event trigger registry and deterministic event-to-action orchestration for Frontier apps and games.",
   "type": "module",
   "license": "MIT",

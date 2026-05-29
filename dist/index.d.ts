@@ -108,6 +108,7 @@ export interface TriggerCapabilityContext {
 export interface TriggerActionBinding {
     id: string;
     input?: JsonValue | TriggerActionInputFactory;
+    emit?: TriggerEventEmissionSource;
     mode?: TriggerDispatchMode;
     lane?: string;
     area?: string;
@@ -121,9 +122,18 @@ export interface TriggerActionBinding {
     run?: TriggerScheduledRun;
 }
 export type TriggerActionInputFactory = (event: TriggerEvent, context: TriggerEvaluationContext) => JsonValue | undefined;
-export type TriggerActionFactory = (event: TriggerEvent, context: TriggerEvaluationContext) => TriggerActionBinding | readonly TriggerActionBinding[] | string | false | null | undefined;
+export type TriggerActionFactory = (event: TriggerEvent, context: TriggerEvaluationContext) => TriggerActionBinding | readonly (TriggerActionBinding | string)[] | string | false | null | undefined;
 export type TriggerKeyFactory = (event: TriggerEvent, context: TriggerEvaluationContext) => string;
 export type TriggerScheduledRun = (event: TriggerEvent, context: TriggerEvaluationContext) => unknown;
+export interface TriggerEventEmission extends TriggerEventInput {
+    inheritScope?: boolean;
+    inheritSubject?: boolean;
+    inheritSubjects?: boolean;
+    inheritActor?: boolean;
+    inheritSource?: boolean;
+}
+export type TriggerEventEmissionFactory = (event: TriggerEvent, context: TriggerEvaluationContext, outcome: TriggerOutcome) => TriggerEventEmission | readonly TriggerEventEmission[] | false | null | undefined;
+export type TriggerEventEmissionSource = TriggerEventEmission | readonly TriggerEventEmission[] | TriggerEventEmissionFactory;
 export interface TriggerSourceLocation {
     file: string;
     line?: number;
@@ -180,7 +190,7 @@ export interface TriggerInfo extends Omit<TriggerDefinition, 'action' | 'actions
     tags: string[];
     hasRuntimeCallbacks: boolean;
 }
-export type TriggerRejectCode = 'invalid-event' | 'no-matching-trigger' | 'scope-mismatch' | 'subject-mismatch' | 'source-mismatch' | 'missing-capability' | 'condition-failed' | 'cooldown' | 'once-per' | 'exclusive-conflict' | 'event-consumed' | 'action-unavailable' | 'action-failed';
+export type TriggerRejectCode = 'invalid-event' | 'no-matching-trigger' | 'scope-mismatch' | 'subject-mismatch' | 'source-mismatch' | 'missing-capability' | 'condition-failed' | 'cooldown' | 'cascade-depth' | 'once-per' | 'exclusive-conflict' | 'event-consumed' | 'action-unavailable' | 'action-failed';
 export interface TriggerRejection {
     code: TriggerRejectCode;
     message: string;
@@ -228,6 +238,8 @@ export interface TriggerEmitResult {
     consumed: boolean;
     event: TriggerEvent;
     record: TriggerRecord;
+    records: TriggerRecord[];
+    cascaded: TriggerRecord[];
     outcomes: TriggerOutcome[];
     matched: TriggerOutcome[];
     scheduled: TriggerScheduledAction[];
@@ -342,6 +354,8 @@ export interface TriggerRuntimeOptions {
     schedulerAutoRun?: boolean;
     schedulerLane?: string;
     schedulerPriority?: unknown;
+    maxCascadeDepth?: number;
+    cascadeRequire?: boolean;
     onRecord?: (record: TriggerRecord) => void;
     onOutcome?: (outcome: TriggerOutcome) => void;
 }
@@ -360,6 +374,8 @@ export interface TriggerEmitOptions {
     autoRun?: boolean;
     runOptions?: unknown;
     now?: number;
+    maxCascadeDepth?: number;
+    cascadeRequire?: boolean;
 }
 export interface TriggerEvaluationContext {
     runtime: TriggerRuntime;

@@ -63,7 +63,9 @@ if (!result.accepted) {
 - Capability gates are first-class. Missing capabilities produce structured `missing-capability` rejections; callers can use `runtime.require(...)` when they need a hard accept/reject result.
 - Outcomes are records, not callback side effects. Every emit returns matched, scheduled, completed, rejected, and failed outcomes with stable rejection codes.
 - Scheduling and action dispatch are structural adapters. A mutation action registry, direct scheduler, game runtime, DOM host, or test harness can be passed in without becoming a dependency.
+- Action bindings can emit follow-up event facts with `emit`. Cascaded events inherit source, actor, scope, subject, subjects, and tick by default, carry `causeId` provenance back to the parent event, and are returned in `result.records`/`result.cascaded`.
 - `once`, `oncePer`, `cooldownMs`, `exclusive`, and `consume` provide common game/event-bus controls while staying deterministic and snapshot-friendly.
+- `maxCascadeDepth` bounds recursive trigger chains. When a loop would exceed the configured depth, the runtime records a structured `cascade-depth` rejection instead of recursing forever.
 - `snapshot()` and `restore()` capture once/cooldown gates and optional history for rewindable runtimes. `replay()` re-emits event facts through the same matching rules.
 - Event-log integration appends trigger emit records using the `frontier-event-log` shape by default, or raw records for simple custom sinks.
 - `inspect()`, `registryGraph()`, and `impact()` expose trigger, event, capability, subject, action, and runtime record relationships for Frontier inspection and AI review flows.
@@ -71,6 +73,30 @@ if (!result.accepted) {
 ## App And Game Use
 
 The same event grammar covers game events such as `game.room.enter`, `game.room.exit`, `physics.collision.start`, `physics.collision.end`, `player.jump`, and DOM/app events such as `dom.click`, `route.enter`, `form.submit`, or any runtime-defined custom event.
+
+Actions can trigger downstream rules without leaving the runtime:
+
+```ts
+runtime.register({
+  id: 'collision.damage',
+  event: 'physics.collision.start',
+  action: {
+    id: 'player.damage',
+    mode: 'dispatch',
+    input: { amount: 1 },
+    emit: { type: 'player.damaged', payload: { amount: 1 } }
+  }
+});
+
+runtime.register({
+  id: 'damage.toast',
+  event: 'player.damaged',
+  action: { id: 'ui.toast', mode: 'dispatch', input: { text: 'Ouch' } }
+});
+
+const result = runtime.require({ type: 'physics.collision.start' });
+console.log(result.records.map((record) => record.event.type));
+```
 
 ## Related Packages
 
@@ -97,6 +123,7 @@ The published Frontier package family is generated from one shared package catal
 - [`@shapeshift-labs/frontier-pathfinding`](https://www.npmjs.com/package/@shapeshift-labs/frontier-pathfinding): Patch-native grid pathfinding, typed-array A*/Dijkstra search, flow fields, connected components, line-of-sight smoothing, dirty-cell invalidation, and scheduler-friendly path jobs.
 - [`@shapeshift-labs/frontier-lod`](https://www.npmjs.com/package/@shapeshift-labs/frontier-lod): Patch-native level-of-detail and significance selection for rendering and computation workloads, compact typed hot paths, multi-observer selection, budget degradation, materialization frames, and scheduler work plans.
 - [`@shapeshift-labs/frontier-route`](https://www.npmjs.com/package/@shapeshift-labs/frontier-route): DOM-neutral app/game route resources, route and scene manifests, match/resolve/transition planning, dependency metadata, sessions, registry graph output, and impact queries.
+- [`@shapeshift-labs/frontier-trace`](https://www.npmjs.com/package/@shapeshift-labs/frontier-trace): Serializable traces, spans, events, causal links, W3C trace context helpers, timeline/resource/path queries, critical-path analysis, registry graph output, JSONL/proof helpers, Chrome trace export, and redaction for app-wide feature observability.
 - [`@shapeshift-labs/frontier-dom`](https://www.npmjs.com/package/@shapeshift-labs/frontier-dom): Patch-native DOM and host renderer bindings, manifest hydration, JSX runtime/compiler helpers, SSR, devtools, and logging bridges.
 - [`@shapeshift-labs/frontier-playwright`](https://www.npmjs.com/package/@shapeshift-labs/frontier-playwright): Playwright/headless automation probes for Frontier state, DOM, devtools, marks, and timeline queries.
 - [`@shapeshift-labs/frontier-crdt`](https://www.npmjs.com/package/@shapeshift-labs/frontier-crdt): Native CRDT documents, update tooling, awareness, branches, conflict introspection, version frames, and undo.
@@ -133,6 +160,7 @@ Package source repositories:
 - [`siliconjungle/-shapeshift-labs-frontier-pathfinding`](https://github.com/siliconjungle/-shapeshift-labs-frontier-pathfinding)
 - [`siliconjungle/-shapeshift-labs-frontier-lod`](https://github.com/siliconjungle/-shapeshift-labs-frontier-lod)
 - [`siliconjungle/-shapeshift-labs-frontier-route`](https://github.com/siliconjungle/-shapeshift-labs-frontier-route)
+- [`siliconjungle/-shapeshift-labs-frontier-trace`](https://github.com/siliconjungle/-shapeshift-labs-frontier-trace)
 - [`siliconjungle/-shapeshift-labs-frontier-dom`](https://github.com/siliconjungle/-shapeshift-labs-frontier-dom)
 - [`siliconjungle/-shapeshift-labs-frontier-playwright`](https://github.com/siliconjungle/-shapeshift-labs-frontier-playwright)
 - [`siliconjungle/-shapeshift-labs-frontier-crdt`](https://github.com/siliconjungle/-shapeshift-labs-frontier-crdt)

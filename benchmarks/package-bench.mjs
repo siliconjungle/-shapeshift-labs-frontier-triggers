@@ -30,6 +30,7 @@ const actions = {
 const input = makeDefinitions(triggerCount);
 const events = makeEvents(eventCount);
 let runtime = createRuntime(input);
+let cascadeRuntime = createCascadeRuntime();
 let cursor = 0;
 
 const rows = [
@@ -48,6 +49,11 @@ const rows = [
   measure('emit-dispatch-' + triggerCount, 64, () => {
     const event = { ...events[cursor++ % events.length], type: 'player.jump', payload: { enabled: true, value: 99 } };
     return runtime.emit(event, { mode: 'dispatch' }).completed.length;
+  }),
+  measure('cascade-chain-8', 64, () => {
+    const result = cascadeRuntime.emit({ type: 'cascade.0', payload: { enabled: true } });
+    if (cascadeRuntime.history().length > 128) cascadeRuntime = createCascadeRuntime();
+    return result.records.length;
   }),
   measure('snapshot-' + triggerCount, 8, () => {
     return runtime.snapshot({ includeHistory: true }).definitions.length;
@@ -96,6 +102,27 @@ function createRuntime(definitions) {
     now: () => 42
   });
   for (const definition of definitions) next.register(definition);
+  return next;
+}
+
+function createCascadeRuntime() {
+  const next = createTriggerRuntime({
+    actions,
+    capabilities: ['cap.inventory'],
+    maxCascadeDepth: 16,
+    now: () => 43
+  });
+  for (let i = 0; i < 8; i++) {
+    next.register({
+      id: 'cascade.' + i,
+      event: 'cascade.' + i,
+      action: {
+        id: 'action.' + i,
+        mode: 'dispatch',
+        emit: i === 7 ? undefined : { type: 'cascade.' + (i + 1), payload: { depth: i + 1 } }
+      }
+    });
+  }
   return next;
 }
 

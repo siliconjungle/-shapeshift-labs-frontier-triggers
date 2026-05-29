@@ -2,6 +2,7 @@ import { cloneJson } from '@shapeshift-labs/frontier/clone';
 import { createFrontierRegistryGraph, frontierRegistryImpact } from '@shapeshift-labs/frontier/registry';
 const DEFAULT_SOURCE = 'frontier.triggers';
 const DEFAULT_MAX_HISTORY = 256;
+const DEFAULT_MAX_CASCADE_DEPTH = 16;
 export function createTriggerRuntime(options = {}) {
     return new FrontierTriggerRuntime(options);
 }
@@ -90,7 +91,8 @@ class FrontierTriggerRuntime {
         let rejected = 0;
         for (let i = 0; i < events.length; i++) {
             const result = this.emitInternal(events[i], options);
-            records[records.length] = cloneRecord(result.record);
+            for (const record of result.records)
+                records[records.length] = cloneRecord(record);
             if (result.accepted)
                 accepted++;
             else
@@ -266,6 +268,7 @@ class FrontierTriggerRuntime {
         const state = options.state ?? this.options.state;
         const matches = [];
         const outcomes = [];
+        const emissions = [];
         const exclusiveGroups = new Set();
         const ordered = Array.from(this.definitions.values())
             .filter((trigger) => trigger.enabled !== false)
@@ -308,13 +311,15 @@ class FrontierTriggerRuntime {
                 exclusiveGroups.add(exclusiveKey);
             this.markOnce(trigger, event, context);
             this.markCooldown(trigger, event, context, now);
-            const actionOutcomes = this.runActions(trigger, event, context, options, now);
-            if (actionOutcomes.length === 0) {
+            const actionResult = this.runActions(trigger, event, context, options, now);
+            if (actionResult.outcomes.length === 0) {
                 outcomes[outcomes.length] = this.outcome(trigger, event, 'matched', undefined, now);
             }
             else {
-                for (const outcome of actionOutcomes)
+                for (const outcome of actionResult.outcomes)
                     outcomes[outcomes.length] = outcome;
+                for (const emission of actionResult.emissions)
+                    emissions[emissions.length] = emission;
             }
             if (trigger.consume) {
                 consumed = true;
@@ -327,7 +332,15 @@ class FrontierTriggerRuntime {
         const rejection = !success && options.require
             ? makeRejection('no-matching-trigger', matches.length === 0 ? 'no trigger matched event' : 'no trigger accepted event', undefined, event.id, event.type)
             : undefined;
-        return this.finalizeEmit(event, outcomes, rejection === undefined, consumed, rejection, options);
+        const result = this.finalizeEmit(event, outcomes, rejection === undefined, consumed, rejection, options);
+        const cascaded = this.emitCascades(emissions, options);
+        return cascaded.length === 0
+            ? result
+            : {
+                ...result,
+                cascaded,
+                records: [result.record, ...cascaded]
+            };
     }
     finalizeEmit(event, outcomes, accepted, consumed, rejection, options) {
         const record = {
@@ -351,6 +364,8 @@ class FrontierTriggerRuntime {
             consumed,
             event: cloneEvent(event),
             record: cloneRecord(record),
+            records: [cloneRecord(record)],
+            cascaded: [],
             outcomes: outcomes.map(cloneOutcome),
             matched: matched.map(cloneOutcome),
             scheduled,
@@ -363,6 +378,7 @@ class FrontierTriggerRuntime {
     runActions(trigger, event, context, options, now) {
         const actions = resolveActions(trigger, event, context);
         const outcomes = [];
+        const emissions = [];
         for (const action of actions) {
             const actionInput = resolveActionInput(action, trigger, event, context);
             const actionId = normalizeId(action.id, 'trigger action id');
@@ -371,13 +387,12 @@ class FrontierTriggerRuntime {
             const scheduler = actionOptions.scheduler;
             const mode = action.mode ?? options.mode ?? trigger.mode ?? 'auto';
             try {
-                if (backend?.has && !backend.has(actionId)) {
-                    outcomes[outcomes.length] = this.outcome(trigger, event, 'rejected', makeRejection('action-unavailable', 'trigger action is not registered: ' + actionId, trigger.id, event.id, event.type), now, actionId);
-                    continue;
-                }
-                if (mode !== 'dispatch' && typeof backend?.schedule === 'function') {
+                const backendHasAction = backend?.has ? backend.has(actionId) : undefined;
+                if (mode !== 'dispatch' && backendHasAction !== false && typeof backend?.schedule === 'function') {
                     const handle = backend.schedule(actionId, actionInput, actionOptions);
-                    outcomes[outcomes.length] = this.scheduledOutcome(trigger, event, actionId, actionOptions, handle, now);
+                    const outcome = this.scheduledOutcome(trigger, event, actionId, actionOptions, handle, now);
+                    outcomes[outcomes.length] = outcome;
+                    this.collectEmissions(emissions, trigger, event, context, action, outcome);
                     continue;
                 }
                 if (mode === 'schedule' && scheduler) {
@@ -397,23 +412,33 @@ class FrontierTriggerRuntime {
                         metadata: actionOptions.metadata,
                         run: action.run
                             ? () => action.run?.(event, context)
-                            : typeof backend?.dispatch === 'function'
+                            : backendHasAction !== false && typeof backend?.dispatch === 'function'
                                 ? () => backend.dispatch?.(actionId, actionInput, actionOptions)
                                 : undefined
                     });
                     if (actionOptions.autoRun)
                         requestSchedulerRun(scheduler, actionOptions.runOptions);
-                    outcomes[outcomes.length] = this.scheduledOutcome(trigger, event, actionId, { ...actionOptions, taskId }, handle, now);
+                    const outcome = this.scheduledOutcome(trigger, event, actionId, { ...actionOptions, taskId }, handle, now);
+                    outcomes[outcomes.length] = outcome;
+                    this.collectEmissions(emissions, trigger, event, context, action, outcome);
                     continue;
                 }
-                if (typeof backend?.dispatch === 'function') {
+                if (backendHasAction !== false && typeof backend?.dispatch === 'function') {
                     const value = backend.dispatch(actionId, actionInput, actionOptions);
-                    outcomes[outcomes.length] = this.outcome(trigger, event, 'completed', undefined, now, actionId, value);
+                    const outcome = this.outcome(trigger, event, 'completed', undefined, now, actionId, value);
+                    outcomes[outcomes.length] = outcome;
+                    this.collectEmissions(emissions, trigger, event, context, action, outcome);
                     continue;
                 }
                 if (action.run) {
                     const value = action.run(event, context);
-                    outcomes[outcomes.length] = this.outcome(trigger, event, 'completed', undefined, now, actionId, value);
+                    const outcome = this.outcome(trigger, event, 'completed', undefined, now, actionId, value);
+                    outcomes[outcomes.length] = outcome;
+                    this.collectEmissions(emissions, trigger, event, context, action, outcome);
+                    continue;
+                }
+                if (backendHasAction === false) {
+                    outcomes[outcomes.length] = this.outcome(trigger, event, 'rejected', makeRejection('action-unavailable', 'trigger action is not registered: ' + actionId, trigger.id, event.id, event.type), now, actionId);
                     continue;
                 }
                 outcomes[outcomes.length] = this.outcome(trigger, event, 'rejected', makeRejection('action-unavailable', 'trigger has no action backend for: ' + actionId, trigger.id, event.id, event.type), now, actionId);
@@ -422,7 +447,65 @@ class FrontierTriggerRuntime {
                 outcomes[outcomes.length] = this.outcome(trigger, event, 'failed', makeRejection('action-failed', errorMessage(error), trigger.id, event.id, event.type), now, actionId);
             }
         }
-        return outcomes;
+        return { outcomes, emissions };
+    }
+    collectEmissions(emissions, trigger, event, context, action, outcome) {
+        if (action.emit === undefined)
+            return;
+        emissions[emissions.length] = { trigger, event, context, outcome, source: action.emit };
+    }
+    emitCascades(emissions, options) {
+        if (emissions.length === 0)
+            return [];
+        const depth = options.cascadeDepth ?? 0;
+        const maxDepth = normalizeCascadeDepthLimit(options.maxCascadeDepth ?? this.options.maxCascadeDepth);
+        const records = [];
+        for (const emission of emissions) {
+            const events = resolveEmittedEvents(emission);
+            for (const eventInput of events) {
+                if (depth >= maxDepth) {
+                    const result = this.rejectCascade(eventInput, emission, options);
+                    records[records.length] = result.record;
+                    continue;
+                }
+                const result = this.emitInternal(eventInput, {
+                    ...options,
+                    require: options.cascadeRequire ?? this.options.cascadeRequire ?? false,
+                    cascadeDepth: depth + 1
+                });
+                for (const record of result.records)
+                    records[records.length] = record;
+            }
+        }
+        return records;
+    }
+    rejectCascade(input, emission, options) {
+        const now = normalizeTimestamp(options.now ?? this.now());
+        let event;
+        try {
+            event = normalizeTriggerEvent(input, {
+                now,
+                source: input.source ?? emission.event.source,
+                sequence: this.nextEventSequence++
+            });
+        }
+        catch {
+            event = {
+                id: input.id ?? 'evt-cascade-depth:' + this.nextEventSequence++,
+                type: input.type ?? 'invalid',
+                source: input.source ?? emission.event.source,
+                subjects: [],
+                timestamp: now,
+                cancelable: true
+            };
+        }
+        const rejection = makeRejection('cascade-depth', 'trigger cascade depth limit reached', emission.trigger.id, event.id, event.type, {
+            parentEventId: emission.event.id,
+            parentOutcomeId: emission.outcome.id,
+            depth: options.cascadeDepth ?? 0,
+            maxDepth: normalizeCascadeDepthLimit(options.maxCascadeDepth ?? this.options.maxCascadeDepth)
+        });
+        return this.finalizeEmit(event, [], false, false, rejection, options);
     }
     actionOptions(trigger, action, event, context, options, actionId) {
         const metadata = mergeRecordMetadata({
@@ -561,6 +644,10 @@ class FrontierTriggerRuntime {
         const id = normalizeId(definition.id, 'trigger id');
         const event = definition.event ?? definition.events ?? '*';
         const subjects = normalizeSubjects(definition.subject, definition.subjects);
+        const emitted = normalizeStringList([
+            ...(definition.emits ?? []),
+            ...staticEmissionTypes(definition)
+        ]);
         return {
             ...cloneDefinition(definition),
             id,
@@ -570,7 +657,7 @@ class FrontierTriggerRuntime {
             subjects,
             reads: (definition.reads ?? []).slice(),
             writes: (definition.writes ?? []).slice(),
-            emits: normalizeStringList(definition.emits),
+            emits: emitted,
             tags: normalizeStringList(definition.tags),
             normalizedPriority: normalizePriority(definition.priority),
             normalizedOrder: this.nextOrder++
@@ -688,6 +775,46 @@ function evaluateCondition(condition, event, context) {
         return { accepted: false };
     return { accepted: true };
 }
+function resolveEmittedEvents(emission) {
+    const value = typeof emission.source === 'function'
+        ? emission.source(emission.event, emission.context, emission.outcome)
+        : emission.source;
+    if (!value)
+        return [];
+    const items = Array.isArray(value) ? value : [value];
+    const out = [];
+    for (const item of items) {
+        if (!item)
+            continue;
+        out[out.length] = normalizeEmittedEvent(item, emission);
+    }
+    return out;
+}
+function normalizeEmittedEvent(input, emission) {
+    const metadata = mergeRecordMetadata({
+        parentEventId: emission.event.id,
+        parentEventType: emission.event.type,
+        parentOutcomeId: emission.outcome.id,
+        triggerId: emission.trigger.id,
+        actionId: emission.outcome.actionId
+    }, input.metadata);
+    return {
+        id: input.id,
+        type: input.type,
+        source: input.source ?? (input.inheritSource === false ? undefined : emission.event.source),
+        subject: input.subject ?? (input.inheritSubject === false ? undefined : emission.event.subject),
+        scope: input.scope ?? (input.inheritScope === false ? undefined : emission.event.scope),
+        subjects: input.subjects ?? (input.inheritSubjects === false ? [] : emission.event.subjects),
+        actor: input.actor ?? (input.inheritActor === false ? undefined : emission.event.actor),
+        causeId: input.causeId ?? emission.event.id,
+        tick: input.tick ?? emission.event.tick,
+        timestamp: input.timestamp,
+        payload: input.payload,
+        data: input.data,
+        metadata,
+        cancelable: input.cancelable
+    };
+}
 function resolveActions(trigger, event, context) {
     const actions = [];
     for (const action of trigger.actions ?? [])
@@ -731,8 +858,26 @@ function cloneActionBinding(input) {
     return {
         ...input,
         id: normalizeId(input.id, 'trigger action id'),
+        emit: cloneEmissionSource(input.emit),
         metadata: input.metadata === undefined ? undefined : cloneJson(input.metadata),
         dependsOn: input.dependsOn === undefined ? undefined : input.dependsOn.slice()
+    };
+}
+function cloneEmissionSource(source) {
+    if (source === undefined || typeof source === 'function')
+        return source;
+    if (Array.isArray(source))
+        return source.map((item) => cloneEmission(item));
+    return cloneEmission(source);
+}
+function cloneEmission(input) {
+    return {
+        ...input,
+        scope: input.scope === undefined ? undefined : cloneScope(input.scope),
+        subjects: input.subjects === undefined ? undefined : input.subjects.map(cloneSubject),
+        payload: cloneOptionalJson(input.payload),
+        data: cloneOptionalJson(input.data),
+        metadata: input.metadata === undefined ? undefined : cloneJson(input.metadata)
     };
 }
 function hasCapability(source, capability, event, context) {
@@ -1079,6 +1224,11 @@ function normalizeHistoryLimit(value) {
         return DEFAULT_MAX_HISTORY;
     return Math.max(0, Math.floor(value));
 }
+function normalizeCascadeDepthLimit(value) {
+    if (!Number.isFinite(value ?? NaN))
+        return DEFAULT_MAX_CASCADE_DEPTH;
+    return Math.max(0, Math.floor(value));
+}
 function compareTriggers(left, right) {
     return right.normalizedPriority - left.normalizedPriority || left.normalizedOrder - right.normalizedOrder;
 }
@@ -1100,6 +1250,9 @@ function isRejection(value) {
 function cloneDefinition(definition) {
     return {
         ...definition,
+        action: definition.action && typeof definition.action === 'object'
+            ? cloneActionBinding(definition.action)
+            : definition.action,
         metadata: definition.metadata === undefined ? undefined : cloneJson(definition.metadata),
         sourceLocation: cloneSourceLocation(definition.sourceLocation),
         requires: definition.requires?.slice(),
@@ -1297,6 +1450,23 @@ function staticActionIds(trigger) {
     }
     return ids;
 }
+function staticEmissionTypes(trigger) {
+    const types = [];
+    for (const action of trigger.actions ?? [])
+        collectStaticEmissionTypes(typeof action === 'string' ? undefined : action.emit, types);
+    if (trigger.action && typeof trigger.action === 'object')
+        collectStaticEmissionTypes(trigger.action.emit, types);
+    return types;
+}
+function collectStaticEmissionTypes(source, types) {
+    if (!source || typeof source === 'function')
+        return;
+    const items = Array.isArray(source) ? source : [source];
+    for (const item of items) {
+        if (isNonEmptyString(item.type) && !types.includes(item.type))
+            types[types.length] = item.type;
+    }
+}
 function hasRuntimeCallbacks(trigger) {
     return typeof trigger.action === 'function' ||
         typeof trigger.input === 'function' ||
@@ -1304,7 +1474,15 @@ function hasRuntimeCallbacks(trigger) {
         typeof trigger.oncePer === 'function' ||
         typeof trigger.cooldownKey === 'function' ||
         (trigger.when ?? []).some(conditionHasCallback) ||
-        (trigger.actions ?? []).some((action) => typeof action !== 'string' && (typeof action.input === 'function' || typeof action.key === 'function' || typeof action.taskId === 'function' || typeof action.run === 'function'));
+        (trigger.actions ?? []).some((action) => typeof action !== 'string' && actionHasCallback(action)) ||
+        (trigger.action !== undefined && typeof trigger.action !== 'string' && typeof trigger.action !== 'function' && actionHasCallback(trigger.action));
+}
+function actionHasCallback(action) {
+    return typeof action.input === 'function' ||
+        typeof action.key === 'function' ||
+        typeof action.taskId === 'function' ||
+        typeof action.run === 'function' ||
+        typeof action.emit === 'function';
 }
 function conditionHasCallback(condition) {
     if ('test' in condition)
